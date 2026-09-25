@@ -15,7 +15,10 @@ base / left / right 三份口令版本按 id 和字段做无状态三方合并�
 并列时优先级总和最大、再并列时素材 id 序列字典序最小的排布；还可在至多 8 个
 布尔开关张成的组合空间中选择启用的口令子集：按口令 id 的开关取值条件筛选，
 排除锚点未启用与同通道冲突的组合，求相对当前取值翻转开关数最少、并列时取值
-序列（false 小于 true）字典序最小的安全组合。
+序列（false 小于 true）字典序最小的安全组合；还可为至多 12 条素材在单台
+不可中断的串行加载器上规划预载：复用编排器解析的口令起点作为加载截止时刻，
+求按时加载条数最多、并列时优先级总和最大、再并列入选 id 升序列表字典序最小
+的方案，并在同一入选集合内取完工最早、并列加载顺序字典序最小的排布。
 
 - 在线接口文档（Swagger UI）：<http://localhost:8000/docs>
 - 健康检查：`GET /health`
@@ -29,6 +32,7 @@ base / left / right 三份口令版本按 id 和字段做无状态三方合并�
 - 临时插播规划接口：`POST /interruptions/plan`
 - 空档填充规划接口：`POST /fillers/plan`
 - 开关分支选择接口：`POST /branches/select`
+- 素材预载规划接口：`POST /assets/preload`
 
 ## 一条命令启动
 
@@ -1338,6 +1342,154 @@ curl -s http://localhost:8000/branches/select \
 条件引用未知开关或未知口令 id 时分别返回 `UNKNOWN_SWITCH` 与
 `CONDITION_TARGET_NOT_FOUND`（`details` 给出未知名称列表）。
 
+## 接口约定：`POST /assets/preload`
+
+直播开始前把素材（片头、备播片、包装文件等）预先加载到播出机：现有口令先复用
+`POST /compile` 的编排器校验并解析每条口令的**起点毫秒**，每条素材通过
+`command_id` 关联一条现有口令，该口令的起点即素材加载的**截止时刻**。只有
+**一台加载器**：它从 `0` 时刻起**串行、不可中断**地工作，一次只加载一条素材，
+素材在 `ready_ms` 之前不能开始，且必须在关联口令起点**之前（含该点）**完成，
+否则该素材只能跳过。接口在全部加载方案中求全局最优的入选集合与加载顺序。
+
+请求体为一个对象：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `commands` | array | 是 | 现有口令数组，每一项的字段与 `POST /compile` 的请求体完全一致 |
+| `assets` | array | 是 | 待预载素材列表，**至多 12 条** |
+
+`assets` 每一项字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 素材唯一 id；不能为空，各素材之间不可重复 |
+| `command_id` | string | 是 | 关联口令 id；必须存在于 `commands`，且各素材不可重复关联同一条口令 |
+| `ready_ms` | integer | 是 | 素材最早可开始加载时刻（毫秒），必须为非负整数 |
+| `load_ms` | integer | 是 | 素材加载耗时（毫秒），必须为正整数 |
+| `priority` | integer | 是 | 素材优先级，必须为非负整数 |
+
+加载与裁决规则：
+
+- 加载器从 `0` 时刻开始，**串行且不可中断**；两条素材首尾相接，前一条的结束
+  时刻即后一条最早可开始时刻，加载器也可以空闲等待某条素材就绪。
+- 素材 `x` 的实际开始时刻 = `max(上一条加载完成时刻, x.ready_ms)`；其结束时刻
+  **不晚于关联口令起点**才算按时（相等允许）。`ready_ms` 晚于关联口令起点、
+  或任何顺序都无法按时完成的素材不会入选。
+- 选择目标依次为：① **按时加载条数最多**；② 并列时入选素材 **priority 总和
+  最大**；③ 再并列时「入选素材按 **id 升序**展开的列表」**字典序最小**。
+- **同一入选集合**内继续裁决：先取**最后一条加载完成时刻最早**（即最早整体
+  完工）的加载顺序；完工时刻仍并列时，取「实际加载 id 顺序」**字典序最小**。
+- 请求无状态、不落数据，服务端不会修改 `commands` 与 `assets`。
+
+响应字段：
+
+- `loads`：入选素材的加载项，**按实际加载顺序**排列；每项含 `id`、`start_ms`
+  （实际开始加载时刻，含等待 `ready_ms` 的空闲）、`end_ms`。
+- `skipped_ids`：未入选（跳过）的素材 id，按 id 升序。
+
+### 请求示例（串行等待与截止时刻）
+
+口令 `base [0,100)`、`opener` 锚定 `base` 为 `[100,200)`、`spot` 锚定 `opener`
+为 `[200,300)`；三条素材分别关联这三条口令，故截止时刻依次为 `0`、`100`、
+`200`：
+
+```bash
+curl -s http://localhost:8000/assets/preload \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commands": [
+      {"id": "base",   "channel": "main", "anchor": "START", "offset_ms": 0,   "duration_ms": 100},
+      {"id": "opener", "channel": "main", "anchor": "base",  "offset_ms": 0,   "duration_ms": 100},
+      {"id": "spot",   "channel": "main", "anchor": "opener","offset_ms": 0,   "duration_ms": 100}
+    ],
+    "assets": [
+      {"id": "logo", "command_id": "base",   "ready_ms": 0,  "load_ms": 30, "priority": 0},
+      {"id": "film", "command_id": "opener", "ready_ms": 60, "load_ms": 40, "priority": 5},
+      {"id": "card", "command_id": "spot",   "ready_ms": 0,  "load_ms": 60, "priority": 1}
+    ]
+  }'
+```
+
+- `logo` 关联起点为 `0` 的 `base`，任何正耗时都无法按时完成，必然跳过。
+- 余下两条：`card` 先在 `0–60` 加载（截止 200）；`film` 等到 `ready_ms=60`
+  后在 `60–100` 加载，恰好在关联口令 `opener` 起点 `100` 完成。两条都按时入选。
+
+响应示例（`200`）：
+
+```json
+{
+  "loads": [
+    {"id": "card", "start_ms": 0,  "end_ms": 60},
+    {"id": "film", "start_ms": 60, "end_ms": 100}
+  ],
+  "skipped_ids": ["logo"]
+}
+```
+
+### 请求示例（条数优先，其次优先级与 id 列表）
+
+下面的例子中高优先级素材必须独占整个加载窗口，条数更少时仍输给两条
+普通素材：
+
+```bash
+curl -s http://localhost:8000/assets/preload \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commands": [
+      {"id": "base", "channel": "main", "anchor": "START", "offset_ms": 0,  "duration_ms": 10},
+      {"id": "zcmd", "channel": "main", "anchor": "base",  "offset_ms": 90, "duration_ms": 10},
+      {"id": "xcmd", "channel": "main", "anchor": "zcmd",  "offset_ms": 90, "duration_ms": 10},
+      {"id": "ycmd", "channel": "main", "anchor": "xcmd",  "offset_ms": 30, "duration_ms": 10}
+    ],
+    "assets": [
+      {"id": "x", "command_id": "xcmd", "ready_ms": 0, "load_ms": 200, "priority": 100},
+      {"id": "y", "command_id": "ycmd", "ready_ms": 0, "load_ms": 50,  "priority": 0},
+      {"id": "z", "command_id": "zcmd", "ready_ms": 0, "load_ms": 50,  "priority": 0}
+    ]
+  }'
+```
+
+`x` 加载耗时 200、截止时刻也是 200，只能独占 `[0, 200)`，无法与截止 100 的 `z`
+或截止 240 的 `y` 同装；而 `y`、`z` 可两条同装（`y 0–50`、`z 50–100`）。按时
+**条数 2 胜过 1**，即使 `x` 的优先级更高。响应示例（`200`）：
+
+```json
+{
+  "loads": [
+    {"id": "y", "start_ms": 0, "end_ms": 50},
+    {"id": "z", "start_ms": 50, "end_ms": 100}
+  ],
+  "skipped_ids": ["x"]
+}
+```
+
+### 请求示例（素材非法，422）
+
+两条素材重复关联同一条口令时返回 `422` + `DUPLICATE_ASSET_COMMAND`：
+
+```bash
+curl -s http://localhost:8000/assets/preload \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commands": [
+      {"id": "a", "channel": "main", "anchor": "START", "offset_ms": 0, "duration_ms": 100},
+      {"id": "b", "channel": "main", "anchor": "a",     "offset_ms": 0, "duration_ms": 100}
+    ],
+    "assets": [
+      {"id": "x", "command_id": "b", "ready_ms": 0, "load_ms": 10, "priority": 0},
+      {"id": "y", "command_id": "b", "ready_ms": 0, "load_ms": 20, "priority": 0}
+    ]
+  }'
+```
+
+```json
+{
+  "code": "DUPLICATE_ASSET_COMMAND",
+  "message": "一条口令至多可被一条素材关联，以下口令被重复关联: b",
+  "details": { "duplicates": ["b"] }
+}
+```
+
 ## 错误处理
 
 所有业务错误均返回 HTTP `422`，响应体统一为：
@@ -1385,6 +1537,10 @@ curl -s http://localhost:8000/branches/select \
 | `CONDITION_TARGET_NOT_FOUND` | 仅 `POST /branches/select`：条件引用了不存在于 `commands` 的口令 id |
 | `UNKNOWN_SWITCH` | 仅 `POST /branches/select`：条件引用了未在 `switches` 中定义的开关名 |
 | `NO_SAFE_COMBINATION` | 仅 `POST /branches/select`：枚举全部开关组合后不存在安全组合，`details.combinations` 为枚举的组合总数 |
+| `INVALID_READY_MS` | 仅 `POST /assets/preload`：素材 `ready_ms` 为负数 |
+| `ASSET_COMMAND_NOT_FOUND` | 仅 `POST /assets/preload`：素材 `command_id` 引用了不存在于 `commands` 的口令 id，`details.ids` 为未知 id（按 id 升序） |
+| `DUPLICATE_ASSET_COMMAND` | 仅 `POST /assets/preload`：多条素材关联同一条口令，`details.duplicates` 为被重复关联的口令 id |
+| `TOO_MANY_PRELOAD_ASSETS` | 仅直接调用核心逻辑时：预载素材超过 12 条（HTTP 层由请求结构校验提前返回 `INVALID_REQUEST`） |
 
 > `POST /versions/merge` 的字段级分歧不是错误：无论是否合并成功都返回 HTTP `200`，
 > 由响应体的 `status`（`merged` / `diverged`）区分；仅版本内部重复 id
@@ -1511,6 +1667,27 @@ curl -s http://localhost:8000/branches/select \
   为枚举的组合总数（即 `2 ^ 开关个数`）。
 - 请求无状态、不落数据；服务端不会修改 `commands`、`switches` 与 `conditions`。
 
+`POST /assets/preload` 额外约定：
+
+- `commands` 的全部校验与错误码和 `/compile` 完全一致（含重复 id、缺失锚点、
+  依赖环、负起点等），且编排非法时优先返回编排错误码。
+- 素材 `id` 为空返回 `INVALID_ID`；重复 `id` 返回 `DUPLICATE_ID`；
+  `load_ms` 非正返回 `INVALID_DURATION`；`ready_ms` 为负返回
+  `INVALID_READY_MS`；`priority` 为负返回 `INVALID_PRIORITY`。
+- `command_id` 引用不存在的口令 id 返回 `ASSET_COMMAND_NOT_FOUND`
+  （`details.ids` 为未知 id，按 id 升序）；多条素材关联同一条口令返回
+  `DUPLICATE_ASSET_COMMAND`（`details.duplicates` 为被重复关联的口令 id）；
+  两类问题同时存在时先报 `ASSET_COMMAND_NOT_FOUND`。
+- 素材超过 12 条、字段缺失 / 类型错误 / 多余字段等结构问题返回
+  `INVALID_REQUEST`（直接调用核心逻辑时素材超限返回 `TOO_MANY_PRELOAD_ASSETS`）。
+- 入选集合按「条数 → 优先级总和 → 入选 id 升序列表字典序」经子集动态规划裁决
+  （素材 ≤ 12）；同一集合的加载顺序先最小化整体完工时刻，再最小化加载 id
+  顺序字典序，贪心重建时以各素材子集的最早完工 / 最晚可开工 DP 作为可行性判据，
+  不逐排列枚举。
+- `loads` 按实际加载顺序返回（不一定按 id 排序，可含加载器等待 `ready_ms`
+  的空闲段）；`skipped_ids` 按 id 升序。
+- 请求无状态、不落数据；服务端不会修改 `commands` 与 `assets`。
+
 ## 本地开发（不使用 Docker）
 
 要求 Python 3.11+：
@@ -1525,7 +1702,7 @@ uvicorn app.main:app --reload --port 8000
 通道改派逻辑位于 `app/routing.py`，
 口令三方合并逻辑位于 `app/merge.py`，临时插播规划逻辑位于
 `app/interruptions.py`，空档填充规划逻辑位于 `app/fillers.py`，
-开关分支选择逻辑位于 `app/branches.py`，
+开关分支选择逻辑位于 `app/branches.py`，素材预载规划逻辑位于 `app/assets.py`，
 均仅使用标准库，可直接运行单元测试：
 
 ```bash
@@ -1538,6 +1715,7 @@ python3 -m unittest discover -s tests
 .
 ├── app/
 │   ├── __init__.py
+│   ├── assets.py           # 纯标准库的素材预载规划（串行加载器子集 DP + 最早完工/最晚开工双判据贪心重建）
 │   ├── branches.py        # 纯标准库的开关分支选择（组合枚举 + 锚点闭合 / 冲突过滤 + 最少翻转裁决）
 │   ├── calibrate.py       # 纯标准库的时钟校准（候选偏移区间扫描 + 一致数最多裁决）
 │   ├── compiler.py        # 纯标准库的依赖解析 / 时间计算 / 冲突检测
@@ -1548,8 +1726,9 @@ python3 -m unittest discover -s tests
 │   ├── reconcile.py       # 纯标准库的实播对账（通道内保序一对一匹配 + 最小罚分 DP）
 │   ├── routing.py         # 纯标准库的通道改派（位掩码分支限界：最少改派 + 字典序裁决）
 │   ├── schemas.py         # Pydantic 请求与响应模型
-│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/runs/calibrate、/routing/assign、/versions/merge、/interruptions/plan、/fillers/plan、/branches/select、/health、统一错误处理）
+│   └── main.py            # FastAPI 入口（/compile、/preview、/schedule/rebalance、/runs/reconcile、/runs/calibrate、/routing/assign、/versions/merge、/interruptions/plan、/fillers/plan、/branches/select、/assets/preload、/health、统一错误处理）
 ├── tests/
+│   ├── test_assets.py         # 素材预载规划核心逻辑单元测试（含全排列暴力对照 fuzz）
 │   ├── test_branches.py       # 开关分支选择核心逻辑单元测试（标准库 unittest）
 │   ├── test_calibrate.py      # 时钟校准核心逻辑单元测试（标准库 unittest）
 │   ├── test_compiler.py       # 编排核心逻辑单元测试（标准库 unittest）

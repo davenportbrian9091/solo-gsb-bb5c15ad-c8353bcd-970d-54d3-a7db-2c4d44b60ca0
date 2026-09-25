@@ -580,6 +580,62 @@ class BranchSelectResponse(BaseModel):
     )
 
 
+class PreloadAssetItem(BaseModel):
+    """单条待预载素材：id、关联口令 id、就绪时刻、加载耗时与优先级。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="素材唯一标识；不能为空，各素材之间不可重复")
+    command_id: str = Field(
+        ...,
+        description=(
+            "关联口令 id；必须存在于 commands 中，各素材之间不可重复关联同一条口令。"
+            "该口令解析出的起点即素材加载截止时刻（结束时刻不晚于它即可，含相等）"
+        ),
+    )
+    ready_ms: int = Field(
+        ..., description="素材最早可开始加载时刻（毫秒），必须为非负整数"
+    )
+    load_ms: int = Field(..., description="素材加载耗时（毫秒），必须为正整数")
+    priority: int = Field(..., description="素材优先级，必须为非负整数")
+
+
+class PreloadRequest(BaseModel):
+    """POST /assets/preload 请求体：/compile 同格式口令数组 + 至多 12 条待预载素材。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[CommandItem] = Field(
+        ..., description="现有口令数组，格式与 POST /compile 的请求体一致"
+    )
+    assets: list[PreloadAssetItem] = Field(
+        ...,
+        description=(
+            "待预载素材列表，至多 12 条；素材 id 不得重复，关联口令必须存在且"
+            "不得被多条素材重复关联"
+        ),
+        max_length=12,
+    )
+
+
+class PreloadEntry(BaseModel):
+    id: str = Field(..., description="入选素材 id")
+    start_ms: int = Field(..., description="实际开始加载时刻（毫秒，>= ready_ms）")
+    end_ms: int = Field(..., description="加载完成时刻（毫秒，<= 关联口令起点）")
+
+
+class PreloadResponse(BaseModel):
+    loads: list[PreloadEntry] = Field(
+        ...,
+        description=(
+            "入选素材的加载项，按实际加载顺序排列；起止时刻为加载器串行重放结果"
+        ),
+    )
+    skipped_ids: list[str] = Field(
+        ..., description="未入选（跳过）的素材 id，按 id 升序"
+    )
+
+
 class ErrorBody(BaseModel):
     code: Literal[
         "INVALID_REQUEST",
@@ -613,6 +669,10 @@ class ErrorBody(BaseModel):
         "CONDITION_TARGET_NOT_FOUND",
         "UNKNOWN_SWITCH",
         "NO_SAFE_COMBINATION",
+        "INVALID_READY_MS",
+        "ASSET_COMMAND_NOT_FOUND",
+        "DUPLICATE_ASSET_COMMAND",
+        "TOO_MANY_PRELOAD_ASSETS",
     ]
     message: str
     details: dict | None = None

@@ -580,6 +580,61 @@ class BranchSelectResponse(BaseModel):
     )
 
 
+class PreloadAssetItem(BaseModel):
+    """单条预载素材：id、关联口令 id、就绪时刻、加载时长、优先级。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., description="素材唯一标识；不能为空，各素材之间不可重复")
+    command_id: str = Field(
+        ...,
+        description=(
+            "关联口令 id（必须存在于 commands 中，不能为空）；"
+            "该口令解析出的起点即素材加载截止时刻，且一条口令至多被一条素材关联"
+        ),
+    )
+    ready_ms: int = Field(..., description="素材最早可开始加载时刻（毫秒），必须为非负整数")
+    load_ms: int = Field(..., description="素材串行加载时长（毫秒），必须为正整数")
+    priority: int = Field(..., description="素材优先级，必须为非负整数")
+
+
+class PreloadRequest(BaseModel):
+    """POST /assets/preload 请求体：/compile 同格式口令数组 + 至多 12 条预载素材。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    commands: list[CommandItem] = Field(
+        ..., description="现有口令数组，格式与 POST /compile 的请求体一致"
+    )
+    assets: list[PreloadAssetItem] = Field(
+        ...,
+        description=(
+            "预载素材列表，至多 12 条；素材 id 与关联的 command_id 均不可重复，"
+            "关联口令必须存在"
+        ),
+        max_length=12,
+    )
+
+
+class PreloadLoadEntry(BaseModel):
+    id: str = Field(..., description="入选（按时加载）素材 id")
+    start_ms: int = Field(..., description="实际开始加载时刻（毫秒），不早于 ready_ms")
+    end_ms: int = Field(..., description="实际加载完成时刻（毫秒），不晚于关联口令起点")
+
+
+class PreloadResponse(BaseModel):
+    loads: list[PreloadLoadEntry] = Field(
+        ...,
+        description=(
+            "入选素材的加载安排，按加载器实际加载顺序排列；"
+            "同一入选集合取总完工最早、并列取加载 id 顺序字典序最小"
+        ),
+    )
+    skipped_ids: list[str] = Field(
+        ..., description="未入选（跳过）的素材 id，按 id 升序"
+    )
+
+
 class ErrorBody(BaseModel):
     code: Literal[
         "INVALID_REQUEST",
@@ -613,6 +668,10 @@ class ErrorBody(BaseModel):
         "CONDITION_TARGET_NOT_FOUND",
         "UNKNOWN_SWITCH",
         "NO_SAFE_COMBINATION",
+        "PRELOAD_TARGET_NOT_FOUND",
+        "DUPLICATE_COMMAND_LINK",
+        "INVALID_READY_MS",
+        "TOO_MANY_PRELOAD_ASSETS",
     ]
     message: str
     details: dict | None = None

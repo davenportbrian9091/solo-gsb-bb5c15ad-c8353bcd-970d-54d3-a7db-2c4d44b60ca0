@@ -13,6 +13,7 @@ from .compiler import CompileError, compile_commands, preview_change
 from .fillers import plan_fillers
 from .interruptions import plan_interruption
 from .merge import merge_versions
+from .preload import plan_preload
 from .rebalance import rebalance_schedule
 from .reconcile import reconcile_runs
 from .routing import assign_routing
@@ -32,6 +33,8 @@ from .schemas import (
     MergeResponse,
     PreviewRequest,
     PreviewResponse,
+    PreloadRequest,
+    PreloadResponse,
     RebalanceRequest,
     RebalanceResponse,
     ReconcileRequest,
@@ -42,7 +45,7 @@ from .schemas import (
 
 app = FastAPI(
     title="直播导播口令编排 API",
-    version="1.9.0",
+    version="1.10.0",
     description=(
         "接收导播口令数组，解析锚点依赖得到每条口令的起止毫秒时间，"
         "并列出同通道半开区间重叠的冲突 id 对；"
@@ -58,7 +61,10 @@ app = FastAPI(
         "还可在目标通道视界内的空档中联合分配填充素材，"
         "求填充总时长最大、并列优先级最高、再并列 id 序列字典序最小的排布；"
         "亦可在至多 8 个布尔开关的组合空间中选择启用的口令子集，"
-        "求翻转开关数最少、并列取值序列字典序最小的安全组合。"
+        "求翻转开关数最少、并列取值序列字典序最小的安全组合；"
+        "还可在口令起点截止、素材就绪时刻与单台串行加载器约束下规划素材预载，"
+        "求按时加载条数最多、并列优先级总和最大、再并列入选 id 升序列表字典序最小，"
+        "同一入选集合取最早完工、并列加载 id 顺序字典序最小的方案。"
     ),
 )
 
@@ -242,4 +248,19 @@ async def branch_select(body: BranchSelectRequest) -> dict:
         [item.model_dump() for item in body.commands],
         [item.model_dump() for item in body.switches],
         [item.model_dump() for item in body.conditions],
+    )
+
+
+@app.post(
+    "/assets/preload",
+    response_model=PreloadResponse,
+    tags=["assets"],
+    summary="素材预载：单台串行加载器上求按时加载条数最多的加载方案",
+    responses={422: {"model": ErrorBody, "description": "请求非法或素材关联非法"}},
+)
+async def assets_preload(body: PreloadRequest) -> dict:
+    # 核心逻辑不依赖 Pydantic，直接喂入 dict 以便独立测试与复用
+    return plan_preload(
+        [item.model_dump() for item in body.commands],
+        [item.model_dump() for item in body.assets],
     )
